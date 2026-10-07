@@ -18,6 +18,10 @@ from nonebot_plugin_htmlrender.api._default import (
     set_default_application_factory,
 )
 from nonebot_plugin_htmlrender.rendering.errors import ProviderUnavailable
+from nonebot_plugin_htmlrender.terminal import (
+    restore_terminal_state,
+    save_terminal_state,
+)
 
 from .composition import prepare_runtime
 from .settings import (
@@ -88,6 +92,10 @@ def initialize_plugin() -> RenderSettings:
     driver = nonebot.get_driver()
     assert_no_legacy_render_keys(driver.config)
     settings = load_render_settings()
+
+    # Snapshot the terminal before any TUI frontend or Playwright child
+    # process can switch it to raw mode; restored during shutdown.
+    save_terminal_state()
 
     runtime = prepare_runtime(settings)
 
@@ -188,6 +196,10 @@ async def run_shutdown() -> None:
     if application is not None:
         await application.aclose()
     logger.info("HTMLRender shut down.")
+    # Child processes (Playwright drivers) may leave a stale raw termios
+    # snapshot on the terminal while dying from SIGINT; restore the state
+    # captured at import time before the interactive shell takes over.
+    restore_terminal_state()
 
 
 __all__ = [
