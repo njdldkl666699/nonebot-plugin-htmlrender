@@ -20,13 +20,12 @@ and before the interactive shell resumes ownership of the terminal.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from nonebot.log import logger
 
-try:
-    import termios
-except ImportError:  # pragma: no cover - Windows lacks termios
-    termios = None  # type: ignore[assignment]
+if TYPE_CHECKING:
+    from termios import _Attr as _TermiosAttr
 
 _STDERR_FILENO = 2
 
@@ -35,15 +34,17 @@ class _TerminalState:
     """Holder for the snapshot; ``None`` until :func:`save_terminal_state` runs."""
 
     def __init__(self) -> None:
-        self.saved: tuple | None = None
+        self.saved: _TermiosAttr | None = None
 
 
 _state = _TerminalState()
 
 
-def _take_snapshot(fd: int = _STDERR_FILENO) -> tuple | None:
+def _take_snapshot(fd: int = _STDERR_FILENO) -> _TermiosAttr | None:
     """Return the current termios settings of ``fd`` if it is a tty."""
-    if termios is None:
+    try:
+        import termios  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - Windows lacks termios
         return None
     try:
         if not os.isatty(fd):
@@ -70,7 +71,11 @@ def restore_terminal_state(fd: int = _STDERR_FILENO) -> None:
     platforms without ``termios``). Only writes when the current state
     actually differs from the snapshot.
     """
-    if termios is None or _state.saved is None:
+    if _state.saved is None:
+        return
+    try:
+        import termios  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - Windows lacks termios
         return
     try:
         if not os.isatty(fd):
