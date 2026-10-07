@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import sys
 from typing import Optional
 
 from nonebot.log import logger
@@ -15,8 +16,56 @@ from nonebot_plugin_htmlrender.config import plugin_config
 from nonebot_plugin_htmlrender.install import install_browser
 from nonebot_plugin_htmlrender.utils import proxy_settings, suppress_and_log, with_lock
 
+try:
+    import termios
+except ImportError:  # Windows 无 termios
+    termios = None  # type: ignore[assignment]
+
 _browser: Optional[Browser] = None
 _playwright: Optional[Playwright] = None
+
+
+def _save_terminal_state() -> Optional[tuple]:
+    """保存终端(标准错误流)当前的 termios 状态。
+
+    进程启动时(本模块导入时)终端处于 shell 的正常(canonical)状态,
+    此时保存一份快照。Playwright 的 node driver 继承了指向终端的
+    stderr,在收到 SIGINT 退出的过程中会把自身启动时(可能已被 TUI
+    设为 raw 模式的)过期 termios 快照写回终端,使终端停留在 raw
+    状态(isig/icanon/echo 全关),表现为 Ctrl+C 失效、输入无回显。
+    """
+    if termios is None:
+        return None
+    try:
+        if sys.stderr.isatty():
+            return termios.tcgetattr(sys.stderr.fileno())
+    except (OSError, ValueError, termios.error):
+        pass
+    return None
+
+
+_original_termios: Optional[tuple] = _save_terminal_state()
+
+
+def _restore_terminal_state() -> None:
+    """恢复终端的 termios 状态。
+
+    在 shutdown 流程末尾调用。若终端状态与进程启动时不一致(被意外
+    改写),则恢复为启动时保存的状态。调用时机位于 uvicorn 的
+    lifespan shutdown 阶段,晚于 SIGINT 到达时 node driver 对终端的
+    污染,早于 shell 重新接管终端,因此能可靠修复终端状态。
+    """
+    if termios is None or _original_termios is None:
+        return
+    try:
+        if not sys.stderr.isatty():
+            return
+        current = termios.tcgetattr(sys.stderr.fileno())
+        if current != _original_termios:
+            termios.tcsetattr(sys.stderr.fileno(), termios.TCSANOW, _original_termios)
+            logger.debug("Restored terminal state altered by child processes.")
+    except (OSError, ValueError, termios.error):
+        pass
 
 
 async def _launch(browser_type: str, **kwargs) -> Browser:
@@ -202,6 +251,9 @@ async def shutdown_browser() -> None:
             logger.debug("Stopping Playwright...")
             await _playwright.stop()
             logger.info("Playwright stopped.")
+    # node driver 可能已在 SIGINT 退出过程中把终端改写为过期的 raw
+    # 状态,在关闭流程末尾恢复进程启动时保存的终端状态。
+    _restore_terminal_state()
 
 
 async def check_playwright_env(**kwargs):
